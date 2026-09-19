@@ -50,10 +50,26 @@ function toContent(data) {
   };
 }
 
+// Chemins bloqués sur l'outil generique render_api : forcent l'utilisation
+// des outils dedies (create_web_service, etc.) qui sont plus fiables.
+const BLOCKED_GENERIC_ROUTES = [
+  { method: "POST", pattern: /^\/services\/?$/, useInstead: "create_web_service" },
+];
+
+function checkBlockedRoute(method, path) {
+  const normalizedPath = ("/" + (path || "").trim()).replace(/\/+/g, "/").split("?")[0];
+  for (const rule of BLOCKED_GENERIC_ROUTES) {
+    if (rule.method === method.toUpperCase() && rule.pattern.test(normalizedPath)) {
+      return rule.useInstead;
+    }
+  }
+  return null;
+}
+
 function createServer() {
   const server = new McpServer({
     name: "render-mcp-server",
-    version: "1.1.0",
+    version: "1.2.0",
   });
 
   server.tool(
@@ -71,7 +87,7 @@ function createServer() {
   server.tool(
     "create_web_service",
     "Crée et héberge un nouveau service web Render à partir d'un dépôt GitHub. " +
-      "Utilise ceci en priorité pour héberger un projet — c'est plus simple et plus fiable que render_api. " +
+      "C'est l'outil OBLIGATOIRE pour créer un service — render_api refuse cette action et redirige ici. " +
       "L'ownerId du compte est déjà pré-rempli, pas besoin de le chercher.",
     {
       name: z.string().describe("Nom du service (visible dans le dashboard Render et dans l'URL)"),
@@ -216,8 +232,9 @@ function createServer() {
     }
   );
 
-  // Outil générique : accès complet et libre à TOUTE l'API Render (v1),
-  // pour ne jamais être limité aux outils listés ci-dessus.
+  // Outil générique : accès à TOUTE l'API Render (v1), pour ne pas être limité
+  // aux outils dédiés — SAUF pour les actions qui ont un outil dédié plus fiable
+  // (voir BLOCKED_GENERIC_ROUTES), où il refuse et redirige.
   server.tool(
     "render_api",
     "Appelle n'importe quel endpoint de l'API Render v1 directement (GET/POST/PATCH/PUT/DELETE). " +
@@ -225,7 +242,7 @@ function createServer() {
       "Utilise cet outil pour TOUT ce qui n'est pas déjà couvert par un outil dédié : " +
       "supprimer des services, bases Postgres, Key Value, cron jobs, sites statiques, " +
       "domaines personnalisés, disques, jobs ponctuels, headers/routes, membres du workspace, etc. " +
-      "Pour CRÉER un web service, préfère l'outil dédié create_web_service.",
+      "ATTENTION : créer un web service (POST /services) est BLOQUÉ ici — utilise create_web_service à la place.",
     {
       method: z
         .enum(["GET", "POST", "PATCH", "PUT", "DELETE"])
@@ -241,6 +258,18 @@ function createServer() {
         .describe("Corps JSON de la requête (pour POST/PATCH/PUT)"),
     },
     async ({ method, path, body }) => {
+      const useInstead = checkBlockedRoute(method, path);
+      if (useInstead) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Action bloquée : la création de service via render_api n'est pas autorisée. Utilise l'outil dédié "${useInstead}" à la place (il gère déjà l'ownerId et la structure correcte).`,
+            },
+          ],
+        };
+      }
       const data = await renderRequest(path, {
         method,
         body: body !== undefined ? JSON.stringify(body) : undefined,
