@@ -1,5 +1,4 @@
 import express from "express";
-import crypto from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -8,8 +7,10 @@ const RENDER_API_BASE = "https://api.render.com/v1";
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
 const DEFAULT_OWNER_ID = process.env.RENDER_OWNER_ID || "tea-d9sqp7jm8hqs73c200t0";
 
-// Lien secret d'autorisation : connu seulement du propriétaire.
-// Doit être défini via la variable d'environnement AUTHORIZE_SECRET sur Render.
+// Secret permanent d'autorisation, défini une fois pour toutes sur Render
+// (variable d'environnement AUTHORIZE_SECRET). Il sert à la fois à ouvrir
+// la page d'autorisation ET comme identifiant de connexion pour le MCP —
+// il ne change jamais, donc il survit à tous les redémarrages/redéploiements.
 const AUTHORIZE_SECRET = process.env.AUTHORIZE_SECRET;
 
 if (!RENDER_API_KEY) {
@@ -19,17 +20,8 @@ if (!RENDER_API_KEY) {
 }
 if (!AUTHORIZE_SECRET) {
   console.warn(
-    "⚠️  AUTHORIZE_SECRET n'est pas défini. La page d'autorisation ne sera pas accessible tant que ce n'est pas fait."
+    "⚠️  AUTHORIZE_SECRET n'est pas défini. La page d'autorisation et la connexion MCP seront indisponibles."
   );
-}
-
-// Tokens d'accès actifs (générés après clic sur "Autoriser").
-// Stockage en mémoire : un redémarrage du service les efface, il faudra
-// ré-autoriser. C'est un choix volontaire de simplicité pour un usage mono-utilisateur.
-const activeTokens = new Set();
-
-function newToken() {
-  return crypto.randomBytes(32).toString("hex");
 }
 
 async function renderRequest(path, options = {}) {
@@ -88,7 +80,7 @@ function checkBlockedRoute(method, path) {
 function createServer() {
   const server = new McpServer({
     name: "render-mcp-server",
-    version: "1.3.0",
+    version: "1.4.0",
   });
 
   server.tool(
@@ -304,9 +296,11 @@ const app = express();
 app.use(express.json());
 
 // ---- Page d'autorisation ----
-// Accessible uniquement avec le lien secret (AUTHORIZE_SECRET).
-// Le propriétaire l'ouvre, clique "Autoriser", un token d'accès est généré
-// et affiché une seule fois pour être collé dans la config LibreChat.
+// Accessible uniquement via le lien secret (AUTHORIZE_SECRET dans l'URL).
+// Cliquer "Autoriser" affiche simplement le token permanent à configurer
+// une bonne fois pour toutes dans chat libre — ce même secret sert ensuite
+// de justificatif pour toutes les requêtes /mcp, sans jamais expirer ni
+// être régénéré, donc aucun redémarrage du service ne casse la connexion.
 app.get("/authorize/:secret", (req, res) => {
   if (!AUTHORIZE_SECRET || req.params.secret !== AUTHORIZE_SECRET) {
     return res.status(404).send("Introuvable.");
@@ -332,27 +326,27 @@ app.post("/authorize/:secret", express.urlencoded({ extended: true }), (req, res
   if (!AUTHORIZE_SECRET || req.params.secret !== AUTHORIZE_SECRET) {
     return res.status(404).send("Introuvable.");
   }
-  const token = newToken();
-  activeTokens.add(token);
   res.send(`
     <!DOCTYPE html>
     <html lang="fr">
     <head><meta charset="utf-8"><title>Autorisé</title></head>
     <body style="font-family: sans-serif; max-width: 560px; margin: 60px auto;">
       <h2>✅ Accès autorisé</h2>
-      <p>Colle ceci dans la config LibreChat (en-tête <code>Authorization</code> du serveur MCP) :</p>
-      <pre style="background:#f3f4f6; padding:12px; border-radius:6px; word-break:break-all;">Bearer ${token}</pre>
-      <p style="color:#666; font-size: 14px;">Ce token ne sera plus jamais affiché. S'il est perdu, ré-ouvre ce lien pour en générer un nouveau (l'ancien reste valide sauf redémarrage du service).</p>
+      <p>Colle ceci UNE FOIS dans la config chat libre (en-tête <code>Authorization</code> du serveur MCP) :</p>
+      <pre style="background:#f3f4f6; padding:12px; border-radius:6px; word-break:break-all;">Bearer ${AUTHORIZE_SECRET}</pre>
+      <p style="color:#666; font-size: 14px;">Ce code ne change jamais et ne saute pas au redémarrage du serveur — une fois collé, tu n'as plus jamais besoin d'y retoucher.</p>
     </body>
     </html>
   `);
 });
 
 // ---- Vérification d'autorisation pour le MCP ----
+// Compare directement au secret permanent stocké sur Render : aucun état en
+// mémoire, donc aucune perte de connexion possible lors d'un redémarrage.
 function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-  if (!token || !activeTokens.has(token)) {
+  if (!AUTHORIZE_SECRET || !token || token !== AUTHORIZE_SECRET) {
     return res.status(401).json({
       error: "Non autorisé. Ouvre le lien d'autorisation fourni par le propriétaire pour te connecter.",
     });
