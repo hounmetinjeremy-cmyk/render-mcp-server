@@ -1,4 +1,5 @@
 import express from "express";
+import crypto from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -7,10 +8,28 @@ const RENDER_API_BASE = "https://api.render.com/v1";
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
 const DEFAULT_OWNER_ID = process.env.RENDER_OWNER_ID || "tea-d9sqp7jm8hqs73c200t0";
 
+// Lien secret d'autorisation : connu seulement du propriétaire.
+// Doit être défini via la variable d'environnement AUTHORIZE_SECRET sur Render.
+const AUTHORIZE_SECRET = process.env.AUTHORIZE_SECRET;
+
 if (!RENDER_API_KEY) {
   console.warn(
     "⚠️  RENDER_API_KEY n'est pas défini. Ajoute-le dans les variables d'environnement du service Render."
   );
+}
+if (!AUTHORIZE_SECRET) {
+  console.warn(
+    "⚠️  AUTHORIZE_SECRET n'est pas défini. La page d'autorisation ne sera pas accessible tant que ce n'est pas fait."
+  );
+}
+
+// Tokens d'accès actifs (générés après clic sur "Autoriser").
+// Stockage en mémoire : un redémarrage du service les efface, il faudra
+// ré-autoriser. C'est un choix volontaire de simplicité pour un usage mono-utilisateur.
+const activeTokens = new Set();
+
+function newToken() {
+  return crypto.randomBytes(32).toString("hex");
 }
 
 async function renderRequest(path, options = {}) {
@@ -69,7 +88,7 @@ function checkBlockedRoute(method, path) {
 function createServer() {
   const server = new McpServer({
     name: "render-mcp-server",
-    version: "1.2.0",
+    version: "1.3.0",
   });
 
   server.tool(
@@ -284,7 +303,64 @@ function createServer() {
 const app = express();
 app.use(express.json());
 
-app.post("/mcp", async (req, res) => {
+// ---- Page d'autorisation ----
+// Accessible uniquement avec le lien secret (AUTHORIZE_SECRET).
+// Le propriétaire l'ouvre, clique "Autoriser", un token d'accès est généré
+// et affiché une seule fois pour être collé dans la config LibreChat.
+app.get("/authorize/:secret", (req, res) => {
+  if (!AUTHORIZE_SECRET || req.params.secret !== AUTHORIZE_SECRET) {
+    return res.status(404).send("Introuvable.");
+  }
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head><meta charset="utf-8"><title>Autoriser l'accès Render</title></head>
+    <body style="font-family: sans-serif; max-width: 480px; margin: 60px auto; text-align: center;">
+      <h2>Connexion au serveur MCP Render</h2>
+      <p>Veux-tu autoriser l'accès à ton compte Render (lecture, déploiements, variables d'environnement, etc.) ?</p>
+      <form method="POST" action="/authorize/${encodeURIComponent(req.params.secret)}">
+        <button type="submit" style="padding: 12px 24px; font-size: 16px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer;">
+          Autoriser
+        </button>
+      </form>
+    </body>
+    </html>
+  `);
+});
+
+app.post("/authorize/:secret", express.urlencoded({ extended: true }), (req, res) => {
+  if (!AUTHORIZE_SECRET || req.params.secret !== AUTHORIZE_SECRET) {
+    return res.status(404).send("Introuvable.");
+  }
+  const token = newToken();
+  activeTokens.add(token);
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head><meta charset="utf-8"><title>Autorisé</title></head>
+    <body style="font-family: sans-serif; max-width: 560px; margin: 60px auto;">
+      <h2>✅ Accès autorisé</h2>
+      <p>Colle ceci dans la config LibreChat (en-tête <code>Authorization</code> du serveur MCP) :</p>
+      <pre style="background:#f3f4f6; padding:12px; border-radius:6px; word-break:break-all;">Bearer ${token}</pre>
+      <p style="color:#666; font-size: 14px;">Ce token ne sera plus jamais affiché. S'il est perdu, ré-ouvre ce lien pour en générer un nouveau (l'ancien reste valide sauf redémarrage du service).</p>
+    </body>
+    </html>
+  `);
+});
+
+// ---- Vérification d'autorisation pour le MCP ----
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token || !activeTokens.has(token)) {
+    return res.status(401).json({
+      error: "Non autorisé. Ouvre le lien d'autorisation fourni par le propriétaire pour te connecter.",
+    });
+  }
+  next();
+}
+
+app.post("/mcp", requireAuth, async (req, res) => {
   try {
     const server = createServer();
     const transport = new StreamableHTTPServerTransport({
@@ -309,7 +385,7 @@ app.post("/mcp", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("Render MCP server is running. Connecte-toi via POST /mcp.");
+  res.send("Render MCP server is running. Connecte-toi via POST /mcp (autorisation requise).");
 });
 
 const PORT = process.env.PORT || 3000;
