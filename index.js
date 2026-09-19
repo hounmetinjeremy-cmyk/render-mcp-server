@@ -5,6 +5,7 @@ import { z } from "zod";
 
 const RENDER_API_BASE = "https://api.render.com/v1";
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
+const DEFAULT_OWNER_ID = process.env.RENDER_OWNER_ID || "tea-d9sqp7jm8hqs73c200t0";
 
 if (!RENDER_API_KEY) {
   console.warn(
@@ -52,7 +53,7 @@ function toContent(data) {
 function createServer() {
   const server = new McpServer({
     name: "render-mcp-server",
-    version: "1.0.0",
+    version: "1.1.0",
   });
 
   server.tool(
@@ -63,6 +64,55 @@ function createServer() {
     },
     async ({ limit }) => {
       const data = await renderRequest(`/services?limit=${limit ?? 20}`);
+      return toContent(data);
+    }
+  );
+
+  server.tool(
+    "create_web_service",
+    "Crée et héberge un nouveau service web Render à partir d'un dépôt GitHub. " +
+      "Utilise ceci en priorité pour héberger un projet — c'est plus simple et plus fiable que render_api. " +
+      "L'ownerId du compte est déjà pré-rempli, pas besoin de le chercher.",
+    {
+      name: z.string().describe("Nom du service (visible dans le dashboard Render et dans l'URL)"),
+      repo: z.string().describe("URL complète du dépôt GitHub, ex: https://github.com/owner/repo"),
+      branch: z.string().optional().default("main").describe("Branche à déployer"),
+      runtime: z
+        .enum(["docker", "node", "python", "ruby", "go", "rust", "static"])
+        .optional()
+        .default("docker")
+        .describe("Type de runtime. 'docker' si le repo contient un Dockerfile."),
+      plan: z.enum(["free", "starter", "standard", "pro"]).optional().default("free"),
+      region: z.string().optional().default("oregon"),
+      buildCommand: z.string().optional().describe("Requis seulement si runtime != docker"),
+      startCommand: z.string().optional().describe("Requis seulement si runtime != docker"),
+      envVars: z
+        .array(z.object({ key: z.string(), value: z.string() }))
+        .optional()
+        .describe("Variables d'environnement à définir dès la création"),
+    },
+    async ({ name, repo, branch, runtime, plan, region, buildCommand, startCommand, envVars }) => {
+      const body = {
+        type: "web_service",
+        name,
+        ownerId: DEFAULT_OWNER_ID,
+        repo,
+        branch: branch || "main",
+        autoDeploy: "yes",
+        serviceDetails: {
+          env: runtime || "docker",
+          plan: plan || "free",
+          region: region || "oregon",
+          ...(runtime && runtime !== "docker"
+            ? { envSpecificDetails: { buildCommand: buildCommand || "", startCommand: startCommand || "" } }
+            : {}),
+        },
+        ...(envVars && envVars.length ? { envVars } : {}),
+      };
+      const data = await renderRequest(`/services`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
       return toContent(data);
     }
   );
@@ -173,8 +223,9 @@ function createServer() {
     "Appelle n'importe quel endpoint de l'API Render v1 directement (GET/POST/PATCH/PUT/DELETE). " +
       "Référence complète des endpoints : https://api-docs.render.com. " +
       "Utilise cet outil pour TOUT ce qui n'est pas déjà couvert par un outil dédié : " +
-      "créer/supprimer des services, bases Postgres, Key Value, cron jobs, sites statiques, " +
-      "domaines personnalisés, disques, jobs ponctuels, headers/routes, membres du workspace, etc.",
+      "supprimer des services, bases Postgres, Key Value, cron jobs, sites statiques, " +
+      "domaines personnalisés, disques, jobs ponctuels, headers/routes, membres du workspace, etc. " +
+      "Pour CRÉER un web service, préfère l'outil dédié create_web_service.",
     {
       method: z
         .enum(["GET", "POST", "PATCH", "PUT", "DELETE"])
