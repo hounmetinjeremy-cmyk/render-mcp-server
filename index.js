@@ -166,6 +166,38 @@ function createServer() {
     }
   );
 
+  // Outil générique : accès complet et libre à TOUTE l'API Render (v1),
+  // pour ne jamais être limité aux outils listés ci-dessus.
+  server.tool(
+    "render_api",
+    "Appelle n'importe quel endpoint de l'API Render v1 directement (GET/POST/PATCH/PUT/DELETE). " +
+      "Référence complète des endpoints : https://api-docs.render.com. " +
+      "Utilise cet outil pour TOUT ce qui n'est pas déjà couvert par un outil dédié : " +
+      "créer/supprimer des services, bases Postgres, Key Value, cron jobs, sites statiques, " +
+      "domaines personnalisés, disques, jobs ponctuels, headers/routes, membres du workspace, etc.",
+    {
+      method: z
+        .enum(["GET", "POST", "PATCH", "PUT", "DELETE"])
+        .describe("Méthode HTTP"),
+      path: z
+        .string()
+        .describe(
+          "Chemin de l'endpoint après /v1, ex: '/services', '/postgres', '/services/srv-xxx/jobs'"
+        ),
+      body: z
+        .any()
+        .optional()
+        .describe("Corps JSON de la requête (pour POST/PATCH/PUT)"),
+    },
+    async ({ method, path, body }) => {
+      const data = await renderRequest(path, {
+        method,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      return toContent(data);
+    }
+  );
+
   return server;
 }
 
